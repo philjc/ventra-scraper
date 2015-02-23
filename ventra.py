@@ -40,9 +40,7 @@ class Ventra:
         home_page_response = fromstring(home_page.content)
         self.verification_token = Ventra.__get_attribute(home_page_response.cssselect("#hdnRequestVerificationToken"), 'value')
 
-        login_headers = self.__headers_with_verification_token(self.ventra_url)
-
-        login_response = self.session.post(self.ventra_url, data=login_payload, headers=login_headers)
+        login_response = self.session.post(self.ventra_url, data=login_payload, headers=self.__headers_with_token(self.ventra_url))
         json_response = json.loads(login_response.content[2:])
 
         self.redirect_url = json_response['Redir']
@@ -58,18 +56,18 @@ class Ventra:
         self.login()
         transit_value = self.session.post("https://www.ventrachicago.com/ajax/NAM.asmx/GetTransitInfo",
                                           data=json.dumps({"s": 1, "IncludePassSupportsTal": True}),
-                                          headers=(self.__xhr_headers(self.redirect_url)))
+                                          headers=self.__headers_with_xhr(self.redirect_url))
         return Ventra.__handle_json_response(transit_value.json())
 
     def get_transit_history(self):
         self.login()
         transit_history = self.session.post("https://www.ventrachicago.com/ajax/NAM.asmx/GetTransactionHistorySimple",
                                             data=json.dumps({"s": 1, "PageSize": 5, "PageNum": 1}),
-                                            headers=(self.__xhr_headers(self.redirect_url)))
+                                            headers=self.__headers_with_xhr(self.redirect_url))
 
         return {"transit_history": Ventra.__handle_json_response(transit_history.json())}
 
-    def __headers_with_verification_token(self, referer_url):
+    def __headers_with_token(self, referer_url):
         headers = {
             "Referer": referer_url,
             "RequestVerificationToken": self.verification_token,
@@ -77,9 +75,9 @@ class Ventra:
         headers.update(Ventra.base_headers)
         return headers
 
-    def __xhr_headers(self, referer_url):
+    def __headers_with_xhr(self, referer_url):
         headers = {'Content-Type': 'application/json'}
-        headers.update(self.__headers_with_verification_token(referer_url))
+        headers.update(self.__headers_with_token(referer_url))
         return headers
 
     @staticmethod
