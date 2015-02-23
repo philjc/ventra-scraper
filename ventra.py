@@ -6,79 +6,93 @@ import requests
 from lxml.html import fromstring
 
 
-_ventra_url = "https://www.ventrachicago.com/"
-_base_headers = {
-    "Host": "www.ventrachicago.com",
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.9; rv:35.0) Gecko/20100101 Firefox/35.0",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-    "Accept-Encoding": "gzip, deflate"
-}
-
-
-def _get_login_payload(user_name, password):
-    return {
-        "__CALLBACKID": "CT_Header$ccHeaderLogin",
-        "__CALLBACKPARAM": "",
-        "__EVENTARGUMENT": "",
-        "__EVENTTARGET": "",
-        "f": "search",
-        "p": password,
-        "pc": "false",
-        "u": user_name
+class Ventra:
+    base_headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.9; rv:35.0) Gecko/20100101 Firefox/35.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate"
     }
 
+    def __init__(self, user_name, password, ventra_url="https://www.ventrachicago.com/"):
+        self.session = requests.Session()
+        self.ventra_url = ventra_url
+        self.user_name = user_name
+        self.password = password
 
-def _handle_json_response(json_doc):
-    d = json_doc['d']
-    if not d['success']:
-        raise Exception(d['error'])
+    def login(self):
+        # we've already logged in, so get out of here
+        if hasattr(self, 'redirect_url'):
+            return
 
-    return d['result']
+        login_payload = {
+            "__CALLBACKID": "CT_Header$ccHeaderLogin",
+            "__CALLBACKPARAM": "",
+            "__EVENTARGUMENT": "",
+            "__EVENTTARGET": "",
+            "pc": "false",
+            "f": "search",
+            "p": self.password,
+            "u": self.user_name
+        }
 
+        home_page = self.session.get(self.ventra_url, headers=Ventra.base_headers)
+        home_page_response = fromstring(home_page.content)
+        self.verification_token = Ventra.__get_attribute(home_page_response.cssselect("#hdnRequestVerificationToken"), 'value')
 
-def _get_attribute(el, att, default=None):
-    return el.pop().get(att) if el else default
+        login_headers = self.__headers_with_verification_token(self.ventra_url)
 
+        login_response = self.session.post(self.ventra_url, data=login_payload, headers=login_headers)
+        json_response = json.loads(login_response.content[2:])
 
-def get_info(user_name, password, include_account_balance=True, include_transit_history=True):
-    if not (include_transit_history or include_account_balance):
-        raise Exception("Noting to do, you haven't requested any information")
+        self.redirect_url = json_response['Redir']
+        self.session.get(self.redirect_url, headers=Ventra.base_headers)
 
-    session = requests.Session()
-    home_page = session.get(_ventra_url, headers=_base_headers)
-    home_page_response = fromstring(home_page.content)
-    verification_token = _get_attribute(home_page_response.cssselect("#hdnRequestVerificationToken"), 'value')
+    def get_info(self):
+        ret_val = {}
+        ret_val.update(self.get_transit_value())
+        ret_val.update(self.get_transit_history())
+        return ret_val
 
-    login_headers = {
-        "Referer": _ventra_url,
-        "RequestVerificationToken": verification_token,
-    }
-    login_headers.update(_base_headers)
+    def get_transit_value(self):
+        self.login()
+        transit_value = self.session.post("https://www.ventrachicago.com/ajax/NAM.asmx/GetTransitInfo",
+                                          data=json.dumps({"s": 1, "IncludePassSupportsTal": True}),
+                                          headers=(self.__xhr_headers(self.redirect_url)))
+        return Ventra.__handle_json_response(transit_value.json())
 
-    login_response = session.post(_ventra_url, data=_get_login_payload(user_name, password), headers=login_headers)
-    json_response = json.loads(login_response.content[2:])
+    def get_transit_history(self):
+        self.login()
+        transit_history = self.session.post("https://www.ventrachicago.com/ajax/NAM.asmx/GetTransactionHistorySimple",
+                                            data=json.dumps({"s": 1, "PageSize": 5, "PageNum": 1}),
+                                            headers=(self.__xhr_headers(self.redirect_url)))
 
-    redirect_url = json_response['Redir']
+        return {"transit_history": Ventra.__handle_json_response(transit_history.json())}
 
-    session.get(redirect_url, headers=_base_headers)
-    login_headers.update({"Referer": redirect_url, 'Content-Type': 'application/json'})
+    def __headers_with_verification_token(self, referer_url):
+        headers = {
+            "Referer": referer_url,
+            "RequestVerificationToken": self.verification_token,
+        }
+        headers.update(Ventra.base_headers)
+        return headers
 
-    transit_value = session.post("https://www.ventrachicago.com/ajax/NAM.asmx/GetTransitInfo",
-                                 data=json.dumps({"s": 1, "IncludePassSupportsTal": True}),
-                                 headers=login_headers) if include_account_balance else None
+    def __xhr_headers(self, referer_url):
+        headers = {'Content-Type': 'application/json'}
+        headers.update(self.__headers_with_verification_token(referer_url))
+        return headers
 
-    transit_history = session.post("https://www.ventrachicago.com/ajax/NAM.asmx/GetTransactionHistorySimple",
-                                   data=json.dumps({"s": 1, "PageSize": 5, "PageNum": 1}),
-                                   headers=login_headers) if include_transit_history else None
+    @staticmethod
+    def __get_attribute(el, att, default=None):
+        return el.pop().get(att) if el else default
 
-    ret_val = {}
-    if transit_value:
-        ret_val.update(_handle_json_response(transit_value.json()))
-    if transit_history:
-        ret_val.update({"transit_history": _handle_json_response(transit_history.json())})
+    @staticmethod
+    def __handle_json_response(json_doc):
+        d = json_doc['d']
+        if not d['success']:
+            raise Exception(d['error'])
 
-    return ret_val
+        return d['result']
 
 
 def _main():
@@ -92,7 +106,8 @@ def _main():
 
         password = getpass("Enter Password: ")
 
-    print(json.dumps(get_info(user_name, password), indent=2))
+    ventra = Ventra(user_name, password)
+    print(json.dumps(ventra.get_info(), indent=2))
 
 
 if __name__ == "__main__":
